@@ -16,6 +16,8 @@ var _ = fs.Node(&File{})
 var _ = fs.NodeOpener(&File{})
 var _ = fs.NodeFsyncer(&File{})
 var _ = fs.NodeSetattrer(&File{})
+var _ = fs.NodeGetxattrer(&File{})
+var _ = fs.NodeSetxattrer(&File{})
 
 type File struct {
 	Chunks     []*filer_pb.FileChunk
@@ -150,4 +152,84 @@ func (file *File) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 	glog.V(3).Infof("%s/%s fsync file %+v", file.dir.Path, file.Name, req)
 
 	return nil
+}
+
+func (file *File) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fuse.GetxattrResponse) error {
+
+	glog.V(3).Infof("%v file getxattr %+v", file.fullpath(), req)
+
+	return file.wfs.withFilerClient(func(client filer_pb.SeaweedFilerClient) error {
+
+		request := &filer_pb.GetEntryAttributesRequest{
+			Name:      file.Name,
+			ParentDir: file.dir.Path,
+		}
+
+		response, err := client.GetEntryAttributes(ctx, request)
+		if err != nil {
+			glog.V(0).Infof("file getxattr read file %v: %v", request, err)
+			return err
+		}
+
+		if response.Extended != nil {
+			resp.Xattr = response.Extended[req.Name]
+		}
+
+		return nil
+	})
+
+}
+
+func (file *File) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
+
+	glog.V(3).Infof("%v file setxattr %+v", file.fullpath(), req)
+
+	return file.wfs.withFilerClient(func(client filer_pb.SeaweedFilerClient) error {
+
+		var extended map[string][]byte
+		{
+			request := &filer_pb.GetEntryAttributesRequest{
+				Name:      file.Name,
+				ParentDir: file.dir.Path,
+			}
+
+			resp, err := client.GetEntryAttributes(ctx, request)
+			if err != nil {
+				glog.V(0).Infof("file attr read file %v: %v", request, err)
+				return err
+			}
+
+			file.attributes = resp.Attributes
+			file.Chunks = resp.Chunks
+			extended = resp.Extended
+		}
+
+		if extended == nil {
+			extended = make(map[string][]byte)
+		}
+		extended[req.Name] = req.Xattr
+
+		{
+			request := &filer_pb.UpdateEntryRequest{
+				Directory: file.dir.Path,
+				Entry: &filer_pb.Entry{
+					Name:       file.Name,
+					Attributes: file.attributes,
+					Chunks:     file.Chunks,
+					Extended:   extended,
+				},
+			}
+			glog.V(1).Infof("set attr file entry: %v", request)
+			_, err := client.UpdateEntry(ctx, request)
+			if err != nil {
+				glog.V(0).Infof("UpdateEntry file %s/%s: %v", file.dir.Path, file.Name, err)
+				return fuse.EIO
+			}
+		}
+
+		req.Flags = 0
+
+		return nil
+	})
+
 }

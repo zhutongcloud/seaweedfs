@@ -28,6 +28,8 @@ var _ = fs.HandleReadDirAller(&Dir{})
 var _ = fs.NodeRemover(&Dir{})
 var _ = fs.NodeRenamer(&Dir{})
 var _ = fs.NodeSetattrer(&Dir{})
+var _ = fs.NodeGetxattrer(&Dir{})
+var _ = fs.NodeSetxattrer(&Dir{})
 
 func (dir *Dir) Attr(context context.Context, attr *fuse.Attr) error {
 
@@ -312,6 +314,87 @@ func (dir *Dir) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fus
 			glog.V(0).Infof("UpdateEntry %s: %v", dir.Path, err)
 			return fuse.EIO
 		}
+
+		return nil
+	})
+
+}
+
+func (dir *Dir) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fuse.GetxattrResponse) error {
+
+	glog.V(3).Infof("%v dir getxattr %+v", dir.Path, req)
+
+	return dir.wfs.withFilerClient(func(client filer_pb.SeaweedFilerClient) error {
+
+		p, n := filer2.FullPath(dir.Path).DirAndName()
+		request := &filer_pb.GetEntryAttributesRequest{
+			Name:      n,
+			ParentDir: p,
+		}
+
+		response, err := client.GetEntryAttributes(ctx, request)
+		if err != nil {
+			glog.V(0).Infof("dir getxattr read file %v: %v", request, err)
+			return err
+		}
+
+		if response.Extended != nil {
+			resp.Xattr = response.Extended[req.Name]
+		}
+
+		return nil
+	})
+
+}
+
+func (dir *Dir) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
+
+	glog.V(3).Infof("%v dir setxattr %+v", dir.Path, req)
+
+	return dir.wfs.withFilerClient(func(client filer_pb.SeaweedFilerClient) error {
+
+		p, n := filer2.FullPath(dir.Path).DirAndName()
+
+		var extended map[string][]byte
+		{
+			request := &filer_pb.GetEntryAttributesRequest{
+				Name:      n,
+				ParentDir: p,
+			}
+
+			resp, err := client.GetEntryAttributes(ctx, request)
+			if err != nil {
+				glog.V(0).Infof("file attr read file %v: %v", request, err)
+				return err
+			}
+
+			dir.attributes = resp.Attributes
+			extended = resp.Extended
+		}
+
+		if extended == nil {
+			extended = make(map[string][]byte)
+		}
+		extended[req.Name] = req.Xattr
+
+		{
+			request := &filer_pb.UpdateEntryRequest{
+				Directory: p,
+				Entry: &filer_pb.Entry{
+					Name:       n,
+					Attributes: dir.attributes,
+					Extended:   extended,
+				},
+			}
+			glog.V(1).Infof("set attr dir entry: %v", request)
+			_, err := client.UpdateEntry(ctx, request)
+			if err != nil {
+				glog.V(0).Infof("UpdateEntry dir %s: %v", dir.Path, err)
+				return fuse.EIO
+			}
+		}
+
+		req.Flags = 0
 
 		return nil
 	})
